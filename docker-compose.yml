@@ -1,0 +1,81 @@
+version: "3.9"
+
+services:
+  # --- PostgreSQL with pgvector ---
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: neuralforge-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: neuralforge
+      POSTGRES_DB: neuralforge
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --- Ollama LLM Server ---
+  ollama:
+    image: ollama/ollama:latest
+    container_name: neuralforge-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Pull Llama 3 on first start
+    entrypoint: >
+      sh -c "ollama serve &
+             sleep 5 &&
+             ollama pull llama3:8b &&
+             wait"
+
+  # --- FastAPI Backend ---
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: neuralforge-api
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:neuralforge@postgres:5432/neuralforge
+      OLLAMA_URL: http://ollama:11434
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    volumes:
+      - ./src:/app/src
+      - model_cache:/root/.cache  # Cache downloaded models
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # --- React Dashboard ---
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: neuralforge-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_URL: http://localhost:8000
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  ollama_data:
+  model_cache:
